@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from receiver import RFDataReceiver
 from signal_filters import SignalPreprocessor
 from anomaly_detector import AnomalyDetector, AnomalyResult
-from jammer_classifier import JammerClassifier
+from jammer_classifier import ClassificationResult, JammerClassifier
 from channel_scanner import ChannelScanner
 from config import SystemConfig
 
