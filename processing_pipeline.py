@@ -178,19 +178,14 @@ class RFProcessingPipeline:
         
         # Extract I/Q samples
         samples = packet_data['samples']
-        logger.info(f"Processing packet with {len(samples)} samples")
-        
         if len(samples) == 0:
-            logger.warning("Received empty samples array")
             return
         
         # Add to buffer
         self.signal_buffer.extend(samples)
-        logger.info(f"Signal buffer now has {len(self.signal_buffer)} samples, window_size={self.window_size}")
         
         # Process windows when we have enough data
         while len(self.signal_buffer) >= self.window_size:
-            logger.info(f"Processing window with {self.window_size} samples")
             # Extract window
             window_samples = np.array(self.signal_buffer[:self.window_size])
             
@@ -231,23 +226,6 @@ class RFProcessingPipeline:
         """
         result = ProcessingResult(timestamp=timestamp)
         
-        # Send signal data to GUI for visualization FIRST (before any processing that might fail)
-        if self.signal_callback:
-            try:
-                logger.info("Calling signal callback for GUI visualization")
-                # Combine I/Q data into complex samples for visualization
-                iq_complex = i_data + 1j * q_data
-                self.signal_callback({
-                    'iq_data': iq_complex,
-                    'fft_data': np.fft.fft(iq_complex),
-                    'timestamp': timestamp
-                })
-                logger.info("Signal callback called successfully")
-            except Exception as e:
-                logger.error(f"Signal callback error: {e}")
-        else:
-            logger.warning("No signal callback set")
-        
         try:
             # 1. Preprocessing
             preprocessed = self.preprocessor.preprocess_iq(i_data, q_data)
@@ -256,6 +234,14 @@ class RFProcessingPipeline:
             spectral_features = self.preprocessor.extract_spectral_features(i_data, q_data)
             temporal_features = self.preprocessor.extract_temporal_features(i_data, q_data)
             rf_puf_features = self.preprocessor.extract_rf_puf_features(i_data, q_data)
+            
+            # Send signal data to GUI for visualization
+            if self.signal_callback and np.random.random() < 0.1:  # Subsample to avoid overwhelming GUI
+                self.signal_callback({
+                    'i_data': i_data,
+                    'q_data': q_data,
+                    'timestamp': timestamp
+                })
             
             # Combine features
             all_features = {**spectral_features, **temporal_features, **rf_puf_features}

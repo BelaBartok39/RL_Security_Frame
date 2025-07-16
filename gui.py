@@ -56,6 +56,10 @@ class RFMonitoringGUI:
         self.spectrogram_data = deque(maxlen=100)  # For waterfall display
         self.constellation_points = {'i': deque(maxlen=1000), 'q': deque(maxlen=1000)}
         
+        # Update control
+        self.gui_update_counter = 0
+        self.plot_update_interval = 5  # Update plots every N GUI updates
+        
         # Setup GUI components
         self._setup_gui()
         
@@ -244,10 +248,6 @@ class RFMonitoringGUI:
         self.pause_signal_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(control_frame, text="Pause", 
                        variable=self.pause_signal_var).pack(side=tk.LEFT, padx=20)
-        
-        # Test signal button
-        ttk.Button(control_frame, text="Test Signal", 
-                  command=self.generate_test_signal).pack(side=tk.LEFT, padx=20)
     
     def create_anomaly_tab(self):
         """Create anomaly detection details tab."""
@@ -349,15 +349,10 @@ class RFMonitoringGUI:
     
     def on_signal_data(self, signal_data):
         """Callback for signal visualization data."""
-        # Log signal data reception at INFO level so we can see it
-        logger.info(f"GUI received signal data: type={type(signal_data)}, keys={list(signal_data.keys()) if isinstance(signal_data, dict) else 'N/A'}")
-        
         # Queue for thread-safe update
         try:
             self.signal_queue.put_nowait(signal_data)
-            logger.info(f"Signal data queued successfully, queue size: {self.signal_queue.qsize()}")
         except queue.Full:
-            logger.warning("Signal queue is full, dropping data")
             pass  # Drop if queue is full
     
     def _update_loop(self):
@@ -385,16 +380,10 @@ class RFMonitoringGUI:
                 if not self.pause_signal_var.get():
                     update_rate = float(self.signal_update_var.get())
                     if time.time() - last_signal_update > (1.0 / update_rate):
-                        signal_processed = 0
                         while not self.signal_queue.empty():
                             signal_data = self.signal_queue.get_nowait()
                             self._process_signal(signal_data)
-                            signal_processed += 1
-                        
-                        if signal_processed > 0:
-                            logger.info(f"Processing {signal_processed} signal frames, updating plots")
-                            self._update_signal_plots()
-                        
+                        self._update_signal_plots()
                         last_signal_update = time.time()
                 
                 # Debug output every 5 seconds
@@ -404,7 +393,9 @@ class RFMonitoringGUI:
                     last_debug_time = time.time()
                 
                 # Update plots
-                self._update_plot()
+                self.gui_update_counter += 1
+                if self.gui_update_counter % self.plot_update_interval == 0:
+                    self._update_plot()
                 
                 time.sleep(0.1)  # 10 Hz update rate
                 
@@ -525,175 +516,6 @@ class RFMonitoringGUI:
             
             self.channel_tree.insert('', tk.END, values=(freq_mhz, energy, clean, last_scan, jammed))
     
-    def _process_signal(self, signal_data):
-        """Process signal data for visualization."""
-        try:
-            # Use INFO level so we can see what's happening
-            logger.info(f"Processing signal data: type={type(signal_data)}")
-            if isinstance(signal_data, dict):
-                logger.info(f"Dict keys: {list(signal_data.keys())}")
-            elif isinstance(signal_data, np.ndarray):
-                logger.info(f"Array shape: {signal_data.shape}, dtype: {signal_data.dtype}, complex: {np.iscomplexobj(signal_data)}")
-            
-            # Extract I/Q data
-            if isinstance(signal_data, dict) and 'iq_data' in signal_data:
-                iq_samples = signal_data['iq_data']
-                logger.info(f"Processing {len(iq_samples)} I/Q samples from dict")
-                if len(iq_samples) > 0:
-                    # Add to constellation plot data
-                    i_data = np.real(iq_samples)
-                    q_data = np.imag(iq_samples)
-                    
-                    # Add to deques (automatically handles maxlen)
-                    self.constellation_points['i'].extend(i_data[-100:])  # Keep last 100 points
-                    self.constellation_points['q'].extend(q_data[-100:])
-                    logger.info(f"Added {len(i_data)} samples to constellation data")
-            
-            # Extract FFT data for spectrogram
-            if isinstance(signal_data, dict) and 'fft_data' in signal_data:
-                fft_magnitude = np.abs(signal_data['fft_data'])
-                logger.info(f"Processing FFT data with {len(fft_magnitude)} bins")
-                # Normalize
-                if np.max(fft_magnitude) > 0:
-                    fft_magnitude = fft_magnitude / np.max(fft_magnitude)
-                
-                # Add to spectrogram data
-                self.spectrogram_data.append(fft_magnitude)
-                logger.info(f"Added FFT data to spectrogram, total frames: {len(self.spectrogram_data)}")
-            
-            # If signal_data is just raw samples (numpy array), treat as I/Q data
-            elif isinstance(signal_data, np.ndarray):
-                logger.info(f"Processing raw numpy array with {len(signal_data)} samples")
-                if np.iscomplexobj(signal_data):
-                    # Complex I/Q data
-                    i_data = np.real(signal_data)
-                    q_data = np.imag(signal_data)
-                    
-                    self.constellation_points['i'].extend(i_data[-100:])
-                    self.constellation_points['q'].extend(q_data[-100:])
-                    
-                    # Compute FFT for spectrogram
-                    fft_data = np.fft.fft(signal_data)
-                    fft_magnitude = np.abs(fft_data)
-                    if np.max(fft_magnitude) > 0:
-                        fft_magnitude = fft_magnitude / np.max(fft_magnitude)
-                    self.spectrogram_data.append(fft_magnitude)
-                    logger.info(f"Generated FFT from complex samples")
-                else:
-                    # Real data - treat as I channel, Q=0
-                    i_data = signal_data
-                    q_data = np.zeros_like(signal_data)
-                    
-                    self.constellation_points['i'].extend(i_data[-100:])
-                    self.constellation_points['q'].extend(q_data[-100:])
-                    
-                    # Compute FFT for spectrogram
-                    fft_data = np.fft.fft(signal_data)
-                    fft_magnitude = np.abs(fft_data)
-                    if np.max(fft_magnitude) > 0:
-                        fft_magnitude = fft_magnitude / np.max(fft_magnitude)
-                    self.spectrogram_data.append(fft_magnitude)
-                    logger.info(f"Generated FFT from real samples")
-            
-            else:
-                logger.warning(f"Unknown signal data format: {type(signal_data)}")
-        
-        except Exception as e:
-            logger.error(f"Signal processing error: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def _update_signal_plots(self):
-        """Update signal visualization plots."""
-        try:
-            # Debug logging
-            const_i_len = len(self.constellation_points['i'])
-            const_q_len = len(self.constellation_points['q'])
-            spec_len = len(self.spectrogram_data)
-            logger.debug(f"Updating plots: constellation I={const_i_len}, Q={const_q_len}, spectrogram={spec_len}")
-            
-            # Update constellation plot
-            if const_i_len > 0 and const_q_len > 0:
-                i_data = list(self.constellation_points['i'])
-                q_data = list(self.constellation_points['q'])
-                
-                # Update scatter plot
-                self.const_ax.clear()
-                self.const_ax.set_title('I/Q Constellation')
-                self.const_ax.set_xlabel('In-phase (I)')
-                self.const_ax.set_ylabel('Quadrature (Q)')
-                self.const_ax.grid(True, alpha=0.3)
-                self.const_ax.set_xlim(-3, 3)
-                self.const_ax.set_ylim(-3, 3)
-                
-                if len(i_data) > 0:
-                    self.const_ax.scatter(i_data, q_data, c='blue', alpha=0.5, s=1)
-                    logger.debug(f"Updated constellation with {len(i_data)} points")
-            
-            # Update spectrogram
-            if spec_len > 0:
-                # Convert to 2D array
-                spec_array = np.array(list(self.spectrogram_data))
-                logger.debug(f"Spectrogram array shape: {spec_array.shape}")
-                
-                # Update spectrogram image
-                self.spec_ax.clear()
-                self.spec_ax.set_title('Spectrogram (FFT Magnitude)')
-                self.spec_ax.set_xlabel('Frequency Bin')
-                self.spec_ax.set_ylabel('Time')
-                
-                im = self.spec_ax.imshow(
-                    spec_array,
-                    aspect='auto',
-                    cmap='viridis',
-                    interpolation='nearest',
-                    origin='lower'
-                )
-                logger.debug("Updated spectrogram image")
-            
-            # Update time domain plot
-            if const_i_len > 0:
-                i_data = list(self.constellation_points['i'])[-500:]  # Last 500 samples
-                q_data = list(self.constellation_points['q'])[-500:]
-                
-                self.time_ax.clear()
-                self.time_ax.set_title('Time Domain Signal')
-                self.time_ax.set_xlabel('Sample')
-                self.time_ax.set_ylabel('Amplitude')
-                self.time_ax.grid(True, alpha=0.3)
-                
-                if len(i_data) > 0:
-                    sample_indices = range(len(i_data))
-                    self.time_ax.plot(sample_indices, i_data, 'b-', label='I', alpha=0.7)
-                    self.time_ax.plot(sample_indices, q_data, 'r-', label='Q', alpha=0.7)
-                    self.time_ax.legend()
-                    logger.debug(f"Updated time domain with {len(i_data)} samples")
-            
-            # Update power spectrum
-            if spec_len > 0:
-                # Use latest FFT data
-                latest_fft = self.spectrogram_data[-1]
-                psd = 20 * np.log10(latest_fft + 1e-10)  # Convert to dB
-                
-                self.psd_ax.clear()
-                self.psd_ax.set_title('Power Spectral Density')
-                self.psd_ax.set_xlabel('Frequency Bin')
-                self.psd_ax.set_ylabel('Power (dB)')
-                self.psd_ax.grid(True, alpha=0.3)
-                
-                freq_bins = range(len(psd))
-                self.psd_ax.plot(freq_bins, psd, 'g-')
-                logger.debug(f"Updated PSD with {len(psd)} bins")
-            
-            # Redraw canvas
-            self.signal_canvas.draw_idle()
-            logger.debug("Signal canvas redrawn")
-            
-        except Exception as e:
-            logger.error(f"Signal plot update error: {e}")
-            import traceback
-            traceback.print_exc()
-    
     def log_message(self, message: str):
         """Add message to log."""
         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -767,34 +589,6 @@ class RFMonitoringGUI:
         if self.pipeline:
             self.pipeline.stop()
         self.root.quit()
-    
-    def generate_test_signal(self):
-        """Generate test signal for visualization debugging."""
-        logger.info("Generating test signal for visualization")
-        
-        # Generate test I/Q data
-        samples = 1024
-        t = np.linspace(0, 1, samples)
-        
-        # Create a complex signal with multiple frequency components
-        freq1, freq2 = 50, 120
-        noise_level = 0.1
-        
-        signal = (np.exp(1j * 2 * np.pi * freq1 * t) + 
-                 0.5 * np.exp(1j * 2 * np.pi * freq2 * t) + 
-                 noise_level * (np.random.randn(samples) + 1j * np.random.randn(samples)))
-        
-        # Create test signal data
-        test_data = {
-            'iq_data': signal,
-            'fft_data': np.fft.fft(signal)
-        }
-        
-        # Process through the signal visualization pipeline
-        self._process_signal(test_data)
-        self._update_signal_plots()
-        
-        self.log_message("Test signal generated and processed")
     
     def run(self):
         """Start the GUI main loop."""
