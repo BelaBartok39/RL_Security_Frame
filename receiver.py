@@ -19,6 +19,30 @@ class RFDataReceiver:
     Receives RF I/Q data over UDP and manages buffering.
     """
     
+    # Class variable to hold shared instance
+    _shared_instance = None
+    _instance_lock = threading.Lock()
+    
+    @classmethod
+    def get_shared_instance(cls, port: int = 12345, **kwargs):
+        """
+        Get or create a shared receiver instance to avoid port conflicts.
+        
+        Args:
+            port: UDP port to listen on
+            **kwargs: Additional arguments for receiver initialization
+            
+        Returns:
+            Shared receiver instance
+        """
+        with cls._instance_lock:
+            if cls._shared_instance is None or cls._shared_instance.port != port:
+                if cls._shared_instance is not None:
+                    # Stop existing instance if different port
+                    cls._shared_instance.stop()
+                cls._shared_instance = cls(port=port, **kwargs)
+            return cls._shared_instance
+    
     def __init__(self, 
                  port: int = 12345,
                  buffer_size: int = 65536,
@@ -41,8 +65,31 @@ class RFDataReceiver:
         # Socket setup
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_size)
-        self.socket.bind((bind_address, port))
-        self.socket.settimeout(0.1)
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        try:
+            self.socket.bind((bind_address, port))
+            self.socket.settimeout(0.1)
+            logger.info(f"Receiver initialized on {bind_address}:{port}")
+        except OSError as e:
+            if e.errno == 98:  # Address already in use
+                logger.warning(f"Port {port} already in use. Another receiver instance may be running.")
+                # Try to find an available port
+                for alt_port in range(port + 1, port + 100):
+                    try:
+                        self.socket.bind((bind_address, alt_port))
+                        self.socket.settimeout(0.1)
+                        self.port = alt_port
+                        logger.info(f"Using alternative port {alt_port}")
+                        break
+                    except OSError:
+                        continue
+                else:
+                    # If no alternative port found, re-raise the original error
+                    logger.error(f"Could not find available port starting from {port}")
+                    raise e
+            else:
+                raise e
         
         # Threading
         self.running = False
@@ -55,8 +102,6 @@ class RFDataReceiver:
         self.packets_received = 0
         self.bytes_received = 0
         self.last_timestamp = 0
-        
-        logger.info(f"Receiver initialized on {bind_address}:{port}")
     
     def start(self):
         """Start receiving data."""

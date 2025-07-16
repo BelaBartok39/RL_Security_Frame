@@ -340,29 +340,52 @@ class ModelTrainer:
         return history
 
 
-def collect_normal_data(duration: int = 60, save_path: str = 'normal_data.npy'):
+def collect_normal_data(duration: int = 60, save_path: str = 'normal_data.npy', 
+                       receiver=None):
     """
     Collect normal RF data for VAE training.
     
     Args:
         duration: Collection duration in seconds
         save_path: Path to save collected data
+        receiver: Existing receiver instance to use (optional)
     """
-    from receiver import RFDataReceiver
-    
     logger.info(f"Collecting normal data for {duration} seconds...")
     
     collected_data = []
+    original_callback = None
     
     def on_data(packet_data):
         collected_data.extend(packet_data['samples'])
     
-    receiver = RFDataReceiver(callback=on_data)
-    receiver.start()
+    # If receiver is provided, use it; otherwise create new one
+    if receiver is not None:
+        # Store original callback to restore later
+        original_callback = receiver.callback
+        receiver.callback = on_data
+        
+        # Start receiver if not already running
+        if not receiver.running:
+            receiver.start()
+            should_stop = True
+        else:
+            should_stop = False
+    else:
+        # Use shared receiver instance to avoid port conflicts
+        from receiver import RFDataReceiver
+        receiver = RFDataReceiver.get_shared_instance(callback=on_data)
+        receiver.start()
+        should_stop = True
     
     time.sleep(duration)
     
-    receiver.stop()
+    # Clean up
+    if should_stop:
+        receiver.stop()
+    
+    # Restore original callback if we borrowed an existing receiver
+    if original_callback is not None:
+        receiver.callback = original_callback
     
     # Save collected data
     data_array = np.array(collected_data)

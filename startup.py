@@ -61,7 +61,8 @@ def initialize_or_train_vae(pipeline, config):
         print("Collection will run for 2 minutes...")
         print("="*60 + "\n")
         
-        collect_normal_data(duration=120, save_path=normal_data_path)
+        collect_normal_data(duration=120, save_path=normal_data_path, 
+                           receiver=pipeline.receiver)
     
     # Create dataset and train
     logger.info("Creating training dataset...")
