@@ -1,0 +1,470 @@
+"""
+Real-time monitoring GUI for RF anomaly detection system.
+Uses tkinter for compatibility and simplicity on Jetson.
+"""
+
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+import threading
+import queue
+import time
+import numpy as np
+from typing import Dict, Optional
+import logging
+from datetime import datetime
+import matplotlib
+
+from processing_pipeline import RFProcessingPipeline
+matplotlib.use('TkAgg')
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+from collections import deque
+
+
+logger = logging.getLogger(__name__)
+
+
+class RFMonitoringGUI:
+    """
+    Real-time monitoring GUI for the RF security framework.
+    """
+    
+    def __init__(self, pipeline: Optional['RFProcessingPipeline'] = None):
+        """
+        Initialize GUI.
+        
+        Args:
+            pipeline: Processing pipeline to monitor
+        """
+        self.pipeline = pipeline
+        self.root = tk.Tk()
+        self.root.title("RF Anomaly Detection Monitor")
+        self.root.geometry("1400x900")
+        
+        # Data queues for thread-safe updates
+        self.anomaly_queue = queue.Queue()
+        self.metrics_queue = queue.Queue()
+        
+        # Data storage for plots
+        self.anomaly_scores = deque(maxlen=300)
+        self.timestamps = deque(maxlen=300)
+        self.threshold_values = deque(maxlen=300)
+        
+        # Setup GUI components
+        self._setup_gui()
+        
+        # Connect to pipeline if provided
+        if pipeline:
+            self.connect_pipeline(pipeline)
+        
+        # Start update thread
+        self.running = True
+        self.update_thread = threading.Thread(target=self._update_loop, daemon=True)
+        self.update_thread.start()
+    
+    def _setup_gui(self):
+        """Setup GUI components."""
+        # Create main frames
+        self.create_menu_bar()
+        
+        # Top frame for status
+        self.status_frame = ttk.Frame(self.root)
+        self.status_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.create_status_panel()
+        
+        # Middle frame with notebook for different views
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create tabs
+        self.create_realtime_tab()
+        self.create_anomaly_tab()
+        self.create_channel_tab()
+        self.create_log_tab()
+    
+    def create_menu_bar(self):
+        """Create menu bar."""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="File", menu=file_menu)
+        file_menu.add_command(label="Save Models", command=self.save_models)
+        file_menu.add_command(label="Load Models", command=self.load_models)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_closing)
+        
+        # Control menu
+        control_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Control", menu=control_menu)
+        control_menu.add_command(label="Start Pipeline", command=self.start_pipeline)
+        control_menu.add_command(label="Stop Pipeline", command=self.stop_pipeline)
+        control_menu.add_separator()
+        control_menu.add_command(label="Reset Threshold", command=self.reset_threshold)
+        control_menu.add_command(label="Channel Sweep", command=self.channel_sweep)
+    
+    def create_status_panel(self):
+        """Create status panel with key metrics."""
+        # Pipeline status
+        self.status_label = ttk.Label(self.status_frame, text="Status: Disconnected", 
+                                     font=('Arial', 12, 'bold'))
+        self.status_label.pack(side=tk.LEFT, padx=10)
+        
+        # Key metrics
+        self.metrics_frame = ttk.Frame(self.status_frame)
+        self.metrics_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.metric_labels = {}
+        metrics = ['Packets', 'Anomalies', 'Channel Hops', 'Processing (ms)']
+        for i, metric in enumerate(metrics):
+            label = ttk.Label(self.metrics_frame, text=f"{metric}: --")
+            label.grid(row=0, column=i, padx=20)
+            self.metric_labels[metric] = label
+    
+    def create_realtime_tab(self):
+        """Create real-time monitoring tab."""
+        realtime_frame = ttk.Frame(self.notebook)
+        self.notebook.add(realtime_frame, text="Real-time Monitor")
+        
+        # Create matplotlib figure for anomaly scores
+        self.fig = Figure(figsize=(12, 6), dpi=80)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_xlabel('Time (samples)')
+        self.ax.set_ylabel('Anomaly Score')
+        self.ax.set_title('Real-time Anomaly Detection')
+        self.ax.grid(True)
+        
+        # Plot lines (will be updated)
+        self.anomaly_line, = self.ax.plot([], [], 'b-', label='Anomaly Score')
+        self.threshold_line, = self.ax.plot([], [], 'r--', label='Threshold')
+        self.ax.legend()
+        
+        # Embed in tkinter
+        self.canvas = FigureCanvasTkAgg(self.fig, master=realtime_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Control frame
+        control_frame = ttk.Frame(realtime_frame)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(control_frame, text="Window:").pack(side=tk.LEFT, padx=5)
+        self.window_var = tk.StringVar(value="300")
+        window_combo = ttk.Combobox(control_frame, textvariable=self.window_var,
+                                   values=["100", "300", "500", "1000"],
+                                   width=10)
+        window_combo.pack(side=tk.LEFT)
+        
+        ttk.Button(control_frame, text="Clear", command=self.clear_plot).pack(side=tk.LEFT, padx=20)
+    
+    def create_anomaly_tab(self):
+        """Create anomaly detection details tab."""
+        anomaly_frame = ttk.Frame(self.notebook)
+        self.notebook.add(anomaly_frame, text="Anomaly Details")
+        
+        # Split into two parts
+        left_frame = ttk.Frame(anomaly_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        right_frame = ttk.Frame(anomaly_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        # Anomaly list
+        ttk.Label(left_frame, text="Recent Anomalies:", font=('Arial', 10, 'bold')).pack()
+        
+        # Treeview for anomaly list
+        columns = ('Time', 'Type', 'Score', 'Confidence', 'Action')
+        self.anomaly_tree = ttk.Treeview(left_frame, columns=columns, show='headings', height=15)
+        
+        for col in columns:
+            self.anomaly_tree.heading(col, text=col)
+            self.anomaly_tree.column(col, width=100)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(left_frame, orient=tk.VERTICAL, command=self.anomaly_tree.yview)
+        self.anomaly_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.anomaly_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Statistics panel
+        ttk.Label(right_frame, text="Detection Statistics:", font=('Arial', 10, 'bold')).pack(pady=10)
+        
+        self.stats_text = tk.Text(right_frame, width=40, height=20, wrap=tk.WORD)
+        self.stats_text.pack(padx=10, pady=5)
+    
+    def create_channel_tab(self):
+        """Create channel status tab."""
+        channel_frame = ttk.Frame(self.notebook)
+        self.notebook.add(channel_frame, text="Channel Status")
+        
+        # Channel list
+        ttk.Label(channel_frame, text="Channel Status:", font=('Arial', 10, 'bold')).pack(pady=5)
+        
+        # Create channel status display
+        columns = ('Frequency', 'Energy (dBm)', 'Status', 'Last Scan', 'Jammed')
+        self.channel_tree = ttk.Treeview(channel_frame, columns=columns, show='headings', height=10)
+        
+        for col in columns:
+            self.channel_tree.heading(col, text=col)
+            self.channel_tree.column(col, width=120)
+        
+        self.channel_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Hop history
+        ttk.Label(channel_frame, text="Channel Hop History:", font=('Arial', 10, 'bold')).pack(pady=5)
+        
+        self.hop_text = scrolledtext.ScrolledText(channel_frame, height=10, wrap=tk.WORD)
+        self.hop_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    
+    def create_log_tab(self):
+        """Create log tab."""
+        log_frame = ttk.Frame(self.notebook)
+        self.notebook.add(log_frame, text="System Log")
+        
+        # Log text area
+        self.log_text = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Control buttons
+        button_frame = ttk.Frame(log_frame)
+        button_frame.pack(fill=tk.X)
+        
+        ttk.Button(button_frame, text="Clear Log", command=self.clear_log).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Save Log", command=self.save_log).pack(side=tk.LEFT, padx=5)
+    
+    def connect_pipeline(self, pipeline):
+        """Connect to processing pipeline."""
+        self.pipeline = pipeline
+        
+        # Set callbacks
+        pipeline.set_anomaly_callback(self.on_anomaly_detected)
+        pipeline.set_metrics_callback(self.on_metrics_update)
+        
+        self.status_label.config(text="Status: Connected")
+        self.log_message("Connected to processing pipeline")
+    
+    def on_anomaly_detected(self, result):
+        """Callback for anomaly detection."""
+        # Queue for thread-safe update
+        self.anomaly_queue.put(result)
+    
+    def on_metrics_update(self, metrics):
+        """Callback for metrics update."""
+        # Queue for thread-safe update
+        self.metrics_queue.put(metrics)
+    
+    def _update_loop(self):
+        """Background thread for updating GUI."""
+        while self.running:
+            try:
+                # Process anomaly queue
+                while not self.anomaly_queue.empty():
+                    result = self.anomaly_queue.get_nowait()
+                    self._process_anomaly(result)
+                
+                # Process metrics queue
+                while not self.metrics_queue.empty():
+                    metrics = self.metrics_queue.get_nowait()
+                    self._update_metrics(metrics)
+                
+                # Update plots
+                self._update_plot()
+                
+                time.sleep(0.1)  # 10 Hz update rate
+                
+            except Exception as e:
+                logger.error(f"GUI update error: {e}")
+    
+    def _process_anomaly(self, result):
+        """Process anomaly result for display."""
+        # Add to plot data
+        self.timestamps.append(len(self.timestamps))
+        self.anomaly_scores.append(result.anomaly_result.anomaly_score)
+        self.threshold_values.append(result.anomaly_result.threshold)
+        
+        # Add to anomaly list if detected
+        if result.anomaly_result.is_anomaly:
+            time_str = datetime.fromtimestamp(result.timestamp).strftime('%H:%M:%S')
+            jammer_type = result.classification_result.jammer_type if result.classification_result else "Unknown"
+            score = f"{result.anomaly_result.anomaly_score:.2f}"
+            confidence = f"{result.anomaly_result.confidence:.2f}"
+            action = result.action_taken or "None"
+            
+            # Insert at top of tree
+            self.anomaly_tree.insert('', 0, values=(time_str, jammer_type, score, confidence, action))
+            
+            # Keep list bounded
+            if len(self.anomaly_tree.get_children()) > 100:
+                self.anomaly_tree.delete(self.anomaly_tree.get_children()[-1])
+            
+            # Log message
+            self.log_message(f"ANOMALY: {jammer_type} detected, score={score}, action={action}")
+    
+    def _update_metrics(self, metrics):
+        """Update metrics display."""
+        # Update status labels
+        pipeline_metrics = metrics.get('pipeline', {})
+        
+        self.metric_labels['Packets'].config(
+            text=f"Packets: {pipeline_metrics.get('packets_processed', 0)}")
+        self.metric_labels['Anomalies'].config(
+            text=f"Anomalies: {pipeline_metrics.get('anomalies_detected', 0)}")
+        self.metric_labels['Channel Hops'].config(
+            text=f"Channel Hops: {pipeline_metrics.get('channel_hops', 0)}")
+        self.metric_labels['Processing (ms)'].config(
+            text=f"Processing (ms): {pipeline_metrics.get('processing_time_ms', 0):.1f}")
+        
+        # Update statistics text
+        self._update_stats_display(metrics)
+        
+        # Update channel status
+        self._update_channel_display(metrics.get('channel_scanner', {}))
+    
+    def _update_plot(self):
+        """Update real-time plot."""
+        if len(self.anomaly_scores) > 0:
+            # Get window size
+            window = int(self.window_var.get())
+            
+            # Slice data to window
+            x_data = list(self.timestamps)[-window:]
+            y_scores = list(self.anomaly_scores)[-window:]
+            y_threshold = list(self.threshold_values)[-window:]
+            
+            # Update plot data
+            self.anomaly_line.set_data(x_data, y_scores)
+            self.threshold_line.set_data(x_data, y_threshold)
+            
+            # Adjust limits
+            if x_data:
+                self.ax.set_xlim(x_data[0], x_data[-1])
+                y_min = min(min(y_scores), min(y_threshold)) * 0.9
+                y_max = max(max(y_scores), max(y_threshold)) * 1.1
+                self.ax.set_ylim(y_min, y_max)
+            
+            # Redraw
+            self.canvas.draw_idle()
+    
+    def _update_stats_display(self, metrics):
+        """Update statistics display."""
+        stats_text = "=== Anomaly Detection ===\n"
+        ad_metrics = metrics.get('anomaly_detector', {})
+        threshold_stats = ad_metrics.get('threshold_stats', {})
+        
+        stats_text += f"Total Samples: {ad_metrics.get('total_samples', 0)}\n"
+        stats_text += f"Anomaly Rate: {ad_metrics.get('anomaly_rate', 0):.2%}\n"
+        stats_text += f"Threshold: {threshold_stats.get('threshold', 0):.3f}\n"
+        stats_text += f"Mean Score: {threshold_stats.get('mean', 0):.3f}\n"
+        stats_text += f"Std Dev: {threshold_stats.get('std', 0):.3f}\n\n"
+        
+        stats_text += "=== Classification ===\n"
+        class_metrics = metrics.get('classifier', {})
+        type_counts = class_metrics.get('type_counts', {})
+        
+        for jtype, count in type_counts.items():
+            stats_text += f"{jtype}: {count}\n"
+        
+        stats_text += f"\nAvg Confidence: {class_metrics.get('average_confidence', 0):.2f}\n"
+        
+        # Update text widget
+        self.stats_text.delete(1.0, tk.END)
+        self.stats_text.insert(1.0, stats_text)
+    
+    def _update_channel_display(self, channel_data):
+        """Update channel status display."""
+        # Clear existing
+        for item in self.channel_tree.get_children():
+            self.channel_tree.delete(item)
+        
+        # Add channel data
+        channels = channel_data.get('channels', {})
+        for freq, status in channels.items():
+            freq_mhz = f"{freq/1e6:.1f} MHz"
+            energy = f"{status['energy_dbm']:.1f}"
+            clean = "Clean" if status['is_clean'] else "Occupied"
+            last_scan = datetime.fromtimestamp(status['last_scan']).strftime('%H:%M:%S') if status['last_scan'] > 0 else "Never"
+            jammed = "Yes" if status['jamming_detected'] else "No"
+            
+            self.channel_tree.insert('', tk.END, values=(freq_mhz, energy, clean, last_scan, jammed))
+    
+    def log_message(self, message: str):
+        """Add message to log."""
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_text.see(tk.END)
+    
+    def clear_plot(self):
+        """Clear the real-time plot."""
+        self.anomaly_scores.clear()
+        self.timestamps.clear()
+        self.threshold_values.clear()
+        self.log_message("Plot cleared")
+    
+    def clear_log(self):
+        """Clear the log."""
+        self.log_text.delete(1.0, tk.END)
+    
+    def save_log(self):
+        """Save log to file."""
+        from tkinter import filedialog
+        filename = filedialog.asksaveasfilename(defaultextension=".txt",
+                                               filetypes=[("Text files", "*.txt")])
+        if filename:
+            with open(filename, 'w') as f:
+                f.write(self.log_text.get(1.0, tk.END))
+            self.log_message(f"Log saved to {filename}")
+    
+    def start_pipeline(self):
+        """Start the processing pipeline."""
+        if self.pipeline:
+            self.pipeline.start()
+            self.status_label.config(text="Status: Running")
+            self.log_message("Pipeline started")
+    
+    def stop_pipeline(self):
+        """Stop the processing pipeline."""
+        if self.pipeline:
+            self.pipeline.stop()
+            self.status_label.config(text="Status: Stopped")
+            self.log_message("Pipeline stopped")
+    
+    def reset_threshold(self):
+        """Reset adaptive threshold."""
+        if self.pipeline:
+            self.pipeline.anomaly_detector.reset_threshold()
+            self.log_message("Threshold reset")
+    
+    def channel_sweep(self):
+        """Perform channel sweep."""
+        if self.pipeline:
+            threading.Thread(target=self.pipeline.channel_scanner.perform_channel_sweep,
+                           daemon=True).start()
+            self.log_message("Channel sweep started")
+    
+    def save_models(self):
+        """Save trained models."""
+        from tkinter import filedialog
+        directory = filedialog.askdirectory()
+        if directory and self.pipeline:
+            self.pipeline.save_models(directory)
+            self.log_message(f"Models saved to {directory}")
+    
+    def load_models(self):
+        """Load trained models."""
+        # Implement model loading dialog
+        self.log_message("Model loading not implemented yet")
+    
+    def on_closing(self):
+        """Handle window closing."""
+        self.running = False
+        if self.pipeline:
+            self.pipeline.stop()
+        self.root.quit()
+    
+    def run(self):
+        """Start the GUI main loop."""
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.mainloop()

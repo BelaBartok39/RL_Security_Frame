@@ -1,0 +1,56 @@
+{
+  "receiver": {
+    "port": 12345,
+    "buffer_size": 65536,
+    "bind_address": "0.0.0.0",
+    "queue_size": 1000
+  },
+  "preprocessing": {
+    "window_size": 1024,
+    "overlap": 0.5,
+    "sample_rate": 2000000.0,
+    "highpass_cutoff": 0.01,
+    "lowpass_cutoff": 0.45,
+    "filter_order": 4,
+    "normalization": "robust",
+    "clip_sigma": 5.0
+  },
+  "anomaly_detection": {
+    "model_path": null,
+    "latent_dim": 32,
+    "beta": 1.0,
+    "device": "cuda",
+    "threshold_window_size": 100,
+    "threshold_percentile": 95.0,
+    "threshold_min_samples": 50,
+    "threshold_update_rate": 0.1
+  },
+  "classifier": {
+    "model_path": null,
+    "jammer_types": [
+      "barrage",
+      "tone",
+      "sweep",
+      "pulse",
+      "protocol_aware"
+    ],
+    "confidence_threshold": 0.7
+  },
+  "channel_scanner": {
+    "scan_channels": [
+      2412000000,
+      2437000000,
+      2462000000,
+      5180000000,
+      5220000000,
+      5745000000
+    ],
+    "scan_duration": 0.1,
+    "energy_threshold_db": -70.0,
+    "tx_port": 12346
+  },
+  "log_level": "INFO",
+  "save_anomalies": true,
+  "anomaly_save_path": "./anomalies",
+  "metrics_update_interval": 1.0
+}
