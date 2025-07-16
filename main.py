@@ -49,6 +49,8 @@ def setup_logging(log_level: str = 'INFO', log_file: Optional[str] = None):
     
     # Suppress matplotlib debug messages
     logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    # Suppress PIL debug messages
+    logging.getLogger('PIL').setLevel(logging.WARNING)
 
 
 def create_default_config_file(filepath: str):

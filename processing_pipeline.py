@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from receiver import RFDataReceiver
 from signal_filters import SignalPreprocessor
 from anomaly_detector import AnomalyDetector, AnomalyResult
-from jammer_classifier import ClassificationResult, JammerClassifier
+from jammer_classifier import JammerClassifier
 from channel_scanner import ChannelScanner
 from config import SystemConfig
 
@@ -96,6 +96,7 @@ class RFProcessingPipeline:
         # Callbacks for GUI updates
         self.anomaly_callback: Optional[Callable] = None
         self.metrics_callback: Optional[Callable] = None
+        self.signal_callback: Optional[Callable] = None
         
         logger.info("Pipeline initialization complete")
     
@@ -234,6 +235,14 @@ class RFProcessingPipeline:
             temporal_features = self.preprocessor.extract_temporal_features(i_data, q_data)
             rf_puf_features = self.preprocessor.extract_rf_puf_features(i_data, q_data)
             
+            # Send signal data to GUI for visualization
+            if self.signal_callback and np.random.random() < 0.1:  # Subsample to avoid overwhelming GUI
+                self.signal_callback({
+                    'i_data': i_data,
+                    'q_data': q_data,
+                    'timestamp': timestamp
+                })
+            
             # Combine features
             all_features = {**spectral_features, **temporal_features, **rf_puf_features}
             result.features = all_features
@@ -328,6 +337,10 @@ class RFProcessingPipeline:
     def set_metrics_callback(self, callback: Callable):
         """Set callback for metrics updates."""
         self.metrics_callback = callback
+    
+    def set_signal_callback(self, callback: Callable):
+        """Set callback for signal visualization."""
+        self.signal_callback = callback
     
     def save_models(self, directory: str):
         """Save all trained models."""

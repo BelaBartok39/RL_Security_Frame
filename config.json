@@ -8,7 +8,7 @@
   "preprocessing": {
     "window_size": 1024,
     "overlap": 0.5,
-    "sample_rate": 2000000.0,
+    "sample_rate": 7000000.0,
     "highpass_cutoff": 0.01,
     "lowpass_cutoff": 0.45,
     "filter_order": 4,

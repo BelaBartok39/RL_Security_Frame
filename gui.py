@@ -13,8 +13,6 @@ from typing import Dict, Optional
 import logging
 from datetime import datetime
 import matplotlib
-
-from processing_pipeline import RFProcessingPipeline
 matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -51,6 +49,11 @@ class RFMonitoringGUI:
         self.timestamps = deque(maxlen=300)
         self.threshold_values = deque(maxlen=300)
         
+        # Signal visualization data
+        self.signal_queue = queue.Queue(maxsize=10)
+        self.spectrogram_data = deque(maxlen=100)  # For waterfall display
+        self.constellation_points = {'i': deque(maxlen=1000), 'q': deque(maxlen=1000)}
+        
         # Setup GUI components
         self._setup_gui()
         
@@ -79,6 +82,7 @@ class RFMonitoringGUI:
         
         # Create tabs
         self.create_realtime_tab()
+        self.create_signal_tab()
         self.create_anomaly_tab()
         self.create_channel_tab()
         self.create_log_tab()
@@ -158,6 +162,86 @@ class RFMonitoringGUI:
         window_combo.pack(side=tk.LEFT)
         
         ttk.Button(control_frame, text="Clear", command=self.clear_plot).pack(side=tk.LEFT, padx=20)
+    
+    def create_signal_tab(self):
+        """Create signal visualization tab with spectrogram and constellation."""
+        signal_frame = ttk.Frame(self.notebook)
+        self.notebook.add(signal_frame, text="Signal Visualization")
+        
+        # Create figure with subplots
+        self.signal_fig = Figure(figsize=(14, 8), dpi=80)
+        
+        # Spectrogram subplot
+        self.spec_ax = self.signal_fig.add_subplot(221)
+        self.spec_ax.set_title('Spectrogram (FFT Magnitude)')
+        self.spec_ax.set_xlabel('Frequency Bin')
+        self.spec_ax.set_ylabel('Time')
+        
+        # Initialize spectrogram image
+        self.spec_image = self.spec_ax.imshow(
+            np.zeros((100, 512)), 
+            aspect='auto', 
+            cmap='viridis',
+            interpolation='nearest',
+            vmin=0, 
+            vmax=1
+        )
+        self.signal_fig.colorbar(self.spec_image, ax=self.spec_ax, label='Magnitude')
+        
+        # Constellation plot
+        self.const_ax = self.signal_fig.add_subplot(222)
+        self.const_ax.set_title('I/Q Constellation')
+        self.const_ax.set_xlabel('In-phase (I)')
+        self.const_ax.set_ylabel('Quadrature (Q)')
+        self.const_ax.grid(True, alpha=0.3)
+        self.const_ax.set_xlim(-3, 3)
+        self.const_ax.set_ylim(-3, 3)
+        
+        # Initialize constellation scatter
+        self.const_scatter = self.const_ax.scatter([], [], c='blue', alpha=0.5, s=1)
+        
+        # Time domain plot
+        self.time_ax = self.signal_fig.add_subplot(223)
+        self.time_ax.set_title('Time Domain Signal')
+        self.time_ax.set_xlabel('Sample')
+        self.time_ax.set_ylabel('Amplitude')
+        self.time_ax.grid(True, alpha=0.3)
+        
+        # Initialize time domain lines
+        self.i_line, = self.time_ax.plot([], [], 'b-', label='I', alpha=0.7)
+        self.q_line, = self.time_ax.plot([], [], 'r-', label='Q', alpha=0.7)
+        self.time_ax.legend()
+        
+        # Power spectrum plot
+        self.psd_ax = self.signal_fig.add_subplot(224)
+        self.psd_ax.set_title('Power Spectral Density')
+        self.psd_ax.set_xlabel('Frequency Bin')
+        self.psd_ax.set_ylabel('Power (dB)')
+        self.psd_ax.grid(True, alpha=0.3)
+        
+        # Initialize PSD line
+        self.psd_line, = self.psd_ax.plot([], [], 'g-')
+        
+        # Embed in tkinter
+        self.signal_canvas = FigureCanvasTkAgg(self.signal_fig, master=signal_frame)
+        self.signal_canvas.draw()
+        self.signal_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Control frame
+        control_frame = ttk.Frame(signal_frame)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
+        
+        ttk.Label(control_frame, text="Update Rate:").pack(side=tk.LEFT, padx=5)
+        self.signal_update_var = tk.StringVar(value="10")
+        update_combo = ttk.Combobox(control_frame, textvariable=self.signal_update_var,
+                                   values=["1", "5", "10", "30"],
+                                   width=10)
+        update_combo.pack(side=tk.LEFT)
+        ttk.Label(control_frame, text="Hz").pack(side=tk.LEFT, padx=5)
+        
+        self.pause_signal_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(control_frame, text="Pause", 
+                       variable=self.pause_signal_var).pack(side=tk.LEFT, padx=20)
     
     def create_anomaly_tab(self):
         """Create anomaly detection details tab."""
@@ -242,6 +326,7 @@ class RFMonitoringGUI:
         # Set callbacks
         pipeline.set_anomaly_callback(self.on_anomaly_detected)
         pipeline.set_metrics_callback(self.on_metrics_update)
+        pipeline.set_signal_callback(self.on_signal_data)
         
         self.status_label.config(text="Status: Connected")
         self.log_message("Connected to processing pipeline")
@@ -256,19 +341,50 @@ class RFMonitoringGUI:
         # Queue for thread-safe update
         self.metrics_queue.put(metrics)
     
+    def on_signal_data(self, signal_data):
+        """Callback for signal visualization data."""
+        # Queue for thread-safe update
+        try:
+            self.signal_queue.put_nowait(signal_data)
+        except queue.Full:
+            pass  # Drop if queue is full
+    
     def _update_loop(self):
         """Background thread for updating GUI."""
+        last_debug_time = time.time()
+        last_signal_update = time.time()
+        
         while self.running:
             try:
                 # Process anomaly queue
+                anomaly_count = 0
                 while not self.anomaly_queue.empty():
                     result = self.anomaly_queue.get_nowait()
                     self._process_anomaly(result)
+                    anomaly_count += 1
                 
                 # Process metrics queue
+                metrics_count = 0
                 while not self.metrics_queue.empty():
                     metrics = self.metrics_queue.get_nowait()
                     self._update_metrics(metrics)
+                    metrics_count += 1
+                
+                # Process signal queue at configured rate
+                if not self.pause_signal_var.get():
+                    update_rate = float(self.signal_update_var.get())
+                    if time.time() - last_signal_update > (1.0 / update_rate):
+                        while not self.signal_queue.empty():
+                            signal_data = self.signal_queue.get_nowait()
+                            self._process_signal(signal_data)
+                        self._update_signal_plots()
+                        last_signal_update = time.time()
+                
+                # Debug output every 5 seconds
+                if time.time() - last_debug_time > 5:
+                    if anomaly_count > 0 or metrics_count > 0:
+                        logger.info(f"GUI processed {anomaly_count} anomalies, {metrics_count} metrics")
+                    last_debug_time = time.time()
                 
                 # Update plots
                 self._update_plot()
@@ -277,6 +393,8 @@ class RFMonitoringGUI:
                 
             except Exception as e:
                 logger.error(f"GUI update error: {e}")
+                import traceback
+                traceback.print_exc()
     
     def _process_anomaly(self, result):
         """Process anomaly result for display."""
