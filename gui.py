@@ -13,6 +13,8 @@ from typing import Dict, Optional
 import logging
 from datetime import datetime
 import matplotlib
+
+from processing_pipeline import RFProcessingPipeline
 matplotlib.use('TkAgg')
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
